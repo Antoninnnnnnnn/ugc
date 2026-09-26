@@ -1,0 +1,13 @@
+.env
+proxy.txt
+runs/
+chrome-network-logger/session_*/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+accounts.csv
+
+chrome-network-logger/
