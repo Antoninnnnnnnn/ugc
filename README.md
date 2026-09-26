@@ -2,7 +2,13 @@
 
 Client HTTP (sans navigateur) qui crée un compte UGC, l’active, se connecte, et l’inscrit au programme fidélité.
 
-Un compte prend environ une minute. Le succès, c’est l’adhésion acceptée sur `fidelite.ugc.fr` (100 points de bienvenue).
+Un compte prend environ une minute. Le succès, c’est l’adhésion acceptée sur `fidelite.ugc.fr`.
+
+## Offre (23–29 septembre 2026)
+
+- **100 points** à l’adhésion, plus **100 points le 8 octobre 2026** si le compte n’a pas été au programme fidélité entre le 1er janvier et le 22 septembre 2026, et n’a jamais déjà reçu de points ou une place offerte pour une adhésion précédente.
+- **200 points = une place de cinéma le mardi.**
+- Les points sont valables **9 mois**.
 
 ## Installation
 
