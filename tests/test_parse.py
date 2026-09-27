@@ -75,6 +75,27 @@ def test_check_pasted_link():
     assert check_pasted_link(mj, "a@b.site")[0] == mj
 
 
+def test_mail_presets(monkeypatch, tmp_path):
+    from ugc_flow import config
+    from ugc_flow.mailer import resolve_host
+
+    assert resolve_host("a@outlook.com", "imap") == ("outlook.office365.com", 993)
+    assert resolve_host("a@orange.fr", "pop3") == ("pop.orange.fr", 995)
+    assert resolve_host("a@exemple.fr", "imap", "mail.exemple.fr") == ("mail.exemple.fr", 993)
+
+    monkeypatch.setattr(config, "load_dotenv", lambda *_a, **_k: None)
+    monkeypatch.setenv("PROXY_FILE", str(tmp_path / "none.txt"))
+    monkeypatch.setenv("IMAP_USER", "")
+    monkeypatch.setenv("IMAP_APP_PASSWORD", "")
+    monkeypatch.setenv("MAIL_USER", "a@yahoo.fr")
+    monkeypatch.setenv("MAIL_PASSWORD", "secret")
+    monkeypatch.setenv("MAIL_PROTOCOL", "pop3")
+    monkeypatch.delenv("USE_IMAP", raising=False)
+    s = config.load_settings()
+    assert s.mail_protocol == "pop3"
+    assert s.endpoint() == ("pop.mail.yahoo.com", 995)
+
+
 def test_settings_modes(tmp_path, monkeypatch):
     from ugc_flow import config
 
@@ -153,3 +174,37 @@ def test_required_false_and_skip_birthday():
     assert data["inscriptionBean.seizeAns"] == "on"
     assert data["inscriptionBean.checked"] == "on"
     assert data["inscriptionBean.confirm"] == person.password
+
+
+def test_append_account(tmp_path):
+    from ugc_flow.runner import Account, append_account
+
+    csv_path = tmp_path / "accounts.csv"
+    acc1 = Account(
+        run_id="run1", email="a@b.c", password="pwd", ok=True, fid_points=100, activated=True, error=""
+    )
+    acc2 = Account(
+        run_id="run2", email="x@y.z", password="pwd", ok=True, fid_points=200, activated=True, error=""
+    )
+    append_account(acc1, csv_path)
+    append_account(acc2, csv_path)
+
+    lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3
+    assert lines[0] == "email;password;points;statut;run_id"
+    assert "a@b.c;pwd;100;OK;run1" in lines[1]
+    assert "x@y.z;pwd;200;OK;run2" in lines[2]
+
+
+def test_proxy_round_robin_and_caching(tmp_path):
+    from ugc_flow.proxy import pick_proxy
+
+    f = tmp_path / "proxies.txt"
+    f.write_text("http://1.1.1.1:80:u1:p1\nhttp://2.2.2.2:80:u2:p2\n", encoding="utf-8")
+
+    p1 = pick_proxy(f)
+    p2 = pick_proxy(f)
+    p3 = pick_proxy(f)
+
+    assert p1 != p2
+    assert p1 == p3

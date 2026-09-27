@@ -7,7 +7,7 @@ from typing import Callable
 from ugc_flow.captcha import solve_friendly_captcha
 from ugc_flow.config import Settings
 from ugc_flow.fidelity import FidelityError, join_fidelity
-from ugc_flow.mailer import MailWatcher
+from ugc_flow.mailer import Mailbox, open_mailbox
 from ugc_flow.parse import email_validation_ok, hidden_csrf, struts_errors
 from ugc_flow.profile import Person, make_person
 from ugc_flow.session import UA, UgcSession
@@ -43,24 +43,31 @@ def run_signup(
     on_step: Callable[[str], None] | None = None,
     ask_link: LinkPrompt | None = None,
     email: str | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict:
-    """ask_link(email) est appelé pour obtenir le lien d'activation quand l'IMAP est désactivé."""
+    """ask_link(email) est appelé quand le protocole est « manual »."""
     step = on_step or (lambda _s: None)
-    if not settings.use_imap and ask_link is None:
-        raise SignupError("IMAP désactivé et aucune saisie manuelle du lien possible")
+    if not settings.fetches_mail and ask_link is None:
+        raise SignupError("mail automatique désactivé et aucune saisie du lien possible")
     person = make_person(settings.catchall_domains, email)
     dump_dir.mkdir(parents=True, exist_ok=True)
     _write_creds(dump_dir, person)
-    watcher: MailWatcher | None = None
-    if settings.use_imap:
-        watcher = MailWatcher(
-            settings.imap_host,
+    if mailbox is not None:
+        box = mailbox
+    else:
+        host, _port = ("", 0)
+        if settings.fetches_mail:
+            host, _port = settings.endpoint()
+        box = open_mailbox(
+            settings.mail_protocol,
+            host,
             settings.imap_user,
             settings.imap_password,
             person.email,
             settings.imap_timeout_sec,
+            ask_link,
         )
-        watcher.start()
+    box.start()
     result: dict = {"email": person.email, "ok": False, "proxy": bool(settings.proxy_source)}
 
     sess: UgcSession | None = None
@@ -69,16 +76,15 @@ def run_signup(
             step("inscription")
             _create_account(sess, settings, person, result)
 
-            if watcher:
-                step("attente mail")
-                link = watcher.wait_link()
-                if not link:
-                    raise SignupError("inscription acceptée mais aucun mail d'activation reçu")
-            else:
-                step("lien d'activation à coller")
-                link = ask_link(person.email)
-                if not link:
-                    raise SignupError("lien d'activation non fourni")
+            step("attente mail" if settings.fetches_mail else "lien d'activation à coller")
+            try:
+                link = box.wait_link()
+            except RuntimeError as exc:
+                raise SignupError(str(exc)) from exc
+            if not link:
+                raise SignupError(
+                    "aucun mail d'activation reçu" if settings.fetches_mail else "lien d'activation non fourni"
+                )
             step("activation")
             act = sess.get(link, "activation")
             if "bien activé" not in act.text:
@@ -112,8 +118,7 @@ def run_signup(
             result["traffic"] = [
                 {"req": n, "sent": s, "recv": r} for n, s, r in sess.traffic
             ]
-        if watcher:
-            watcher.stop()
+        box.stop()
 
 
 def _create_account(sess: UgcSession, settings: Settings, person: Person, result: dict) -> None:

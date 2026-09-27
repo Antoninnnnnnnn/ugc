@@ -2,7 +2,7 @@
 
 Client HTTP (sans navigateur) qui crée un compte UGC, l’active, se connecte, et l’inscrit au programme fidélité.
 
-Un compte prend environ une minute. Le succès, c’est l’adhésion acceptée sur `fidelite.ugc.fr`.
+Chaque compte prend environ une minute. L’opération est réussie lorsque `fidelite.ugc.fr` accepte l’adhésion.
 
 ## Offre (23–29 septembre 2026)
 
@@ -23,9 +23,10 @@ Remplis `.env` :
 
 | Variable | Rôle |
 |---|---|
-| `CATCHALL_DOMAINS` | Optionnel. Domaines catch-all, séparés par des virgules. Vide : le premier compte utilise `IMAP_USER`, puis le script demande si les suivants doivent être des alias Gmail avec des points (`prenom.nom@gmail.com`) |
-| `IMAP_USER` | Adresse Gmail |
-| `IMAP_APP_PASSWORD` | Mot de passe d’application Gmail (16 caractères, les espaces sont ignorés) |
+| `CATCHALL_DOMAINS` | Optionnel. Domaines catch-all, séparés par des virgules. Vide : le premier compte reprend `MAIL_USER`. Avec Gmail, le script peut ensuite proposer des alias (points dans la partie locale) |
+| `MAIL_USER` | Adresse de la boîte qui reçoit les mails d’activation |
+| `MAIL_PASSWORD` | Mot de passe, ou mot de passe d’application (Gmail, Outlook). Les espaces sont ignorés |
+| `MAIL_PROTOCOL` | `auto`, `imap`, `pop3` ou `manual`. `auto` choisit IMAP si `MAIL_USER` et `MAIL_PASSWORD` sont renseignés, sinon la saisie du lien |
 | `CAPTCHA_API_KEY` | Clé CapMonster Cloud |
 
 Le captcha du site est Friendly Captcha **v2**. CapSolver ne produit que des jetons v1, que UGC refuse. Le fournisseur attendu est CapMonster (`CAPTCHA_PROVIDER=capmonster`).
@@ -38,9 +39,9 @@ Fichier `proxy.txt`, une ligne par proxy :
 http://host:port:utilisateur:motdepasse
 ```
 
-`USE_PROXY=auto` et `USE_IMAP=auto` (défaut) : le proxy est utilisé s’il y a des lignes dans `proxy.txt`, l’IMAP est utilisé si le mot de passe est renseigné. `0` force la désactivation.
+`USE_PROXY=auto` : le proxy est utilisé s’il y a des lignes dans `proxy.txt`. `0` force la connexion directe.
 
-Sans proxy, la connexion part en direct. Sans IMAP, le script s’arrête après l’envoi du mail et demande de coller le lien d’activation.
+L’hôte mail est déduit de l’adresse : Gmail, Outlook, Hotmail, Yahoo, iCloud, GMX, Orange, Free, La Poste, SFR. Pour un autre fournisseur, indique `MAIL_HOST`. Le menu (choix 7) passe d’IMAP à POP3, puis à la saisie manuelle du lien. Sans identifiants, le script demande ce lien.
 
 ## Lancer
 
@@ -50,13 +51,13 @@ py main.py
 
 | Choix | Action |
 |---|---|
-| 1 | Créer des comptes. Avec l’IMAP, plusieurs en parallèle (5 maximum). Sans IMAP, un par un, le temps de coller le lien |
-| 2 | Voir les comptes (e-mail, mot de passe, points). Les échecs sont masqués, sauf si on demande à les voir |
+| 1 | Créer des comptes. En IMAP ou POP3, plusieurs en parallèle. En saisie manuelle du lien, un seul à la fois |
+| 2 | Voir les comptes (e-mail, mot de passe, points). Les échecs sont masqués par défaut |
 | 3 | Exporter les comptes OK dans `accounts.csv` |
-| 4 | Finir l’adhésion d’un compte déjà activé mais pas encore fidélité |
+| 4 | Terminer l’adhésion d’un compte déjà activé, pas encore inscrit au programme |
 | 5 | Lire les derniers mails reçus |
-| 6 | Vérifier proxies, solde captcha et IMAP |
-| 7 | Couper le proxy ou l’IMAP pour cette session |
+| 6 | Vérifier les proxies, le solde captcha et la connexion à la boîte mail |
+| 7 | Désactiver le proxy, ou changer le protocole mail, pour la session en cours |
 
 Les mêmes actions en ligne de commande :
 
@@ -72,9 +73,9 @@ Chaque compte consomme deux captchas (inscription, puis connexion).
 
 ## Où sont les comptes
 
-`runs/<date>_<id>/credentials.json` est écrit avant la première requête : e-mail, mot de passe, nom, date de naissance, code postal. `result.json` dit jusqu’où le parcours est allé.
+`runs/<date>_<id>/credentials.json` est écrit avant la première requête : e-mail, mot de passe, nom, date de naissance, code postal. `result.json` enregistre l’étape atteinte, y compris en cas d’échec.
 
-`accounts.csv` (séparateur `;`) reprend les comptes OK : e-mail, mot de passe, points, statut, identifiant du run. Il est réécrit après chaque compte. Il se régénère depuis `runs/` : ne supprime pas ce dossier.
+`accounts.csv` (séparateur `;`) reprend les comptes OK : e-mail, mot de passe, points, statut, identifiant du run. Il est réécrit après chaque compte, à partir de `runs/`. Ne supprime pas ce dossier.
 
 Les mots de passe sont en clair. Ces fichiers ne sont pas dans git.
 

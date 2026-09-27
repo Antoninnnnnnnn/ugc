@@ -10,6 +10,7 @@ from typing import Callable
 
 from ugc_flow.config import Settings
 from ugc_flow.fidelity import join_fidelity
+from ugc_flow.mailer import Mailbox
 from ugc_flow.profile import Person
 from ugc_flow.session import UgcSession
 from ugc_flow.signup import LinkPrompt, _login, run_signup
@@ -24,11 +25,12 @@ def run_one(
     on_step: Callable[[str], None] | None = None,
     ask_link: LinkPrompt | None = None,
     email: str | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict:
     run_id = new_run_id()
     dump_dir = settings.runs_dir / run_id
     try:
-        result = run_signup(settings, dump_dir, on_step, ask_link, email)
+        result = run_signup(settings, dump_dir, on_step, ask_link, email, mailbox=mailbox)
     except Exception as exc:
         result = {"ok": False, "error": repr(exc)}
     dump_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +107,15 @@ def export_accounts(accounts: list[Account], path: Path, only_ok: bool = True) -
         for a in rows:
             w.writerow([a.email, a.password, a.fid_points or "", a.status, a.run_id])
     return len(rows)
+
+
+def append_account(acc: Account, path: Path) -> None:
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, delimiter=";")
+        if write_header:
+            w.writerow(["email", "password", "points", "statut", "run_id"])
+        w.writerow([acc.email, acc.password, acc.fid_points or "", acc.status, acc.run_id])
 
 
 def join_existing(settings: Settings, run_dir: Path) -> int:

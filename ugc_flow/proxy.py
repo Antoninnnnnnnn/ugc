@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import random
+import threading
 from pathlib import Path
 from urllib.parse import quote
+
+_cache: dict[str, tuple[float, list[str]]] = {}
+_cache_lock = threading.Lock()
+_rr_idx = 0
 
 
 def parse_proxy_line(line: str) -> str:
@@ -20,6 +24,13 @@ def parse_proxy_line(line: str) -> str:
 def load_proxies(path: Path) -> list[str]:
     if not path.exists():
         raise FileNotFoundError(f"proxy file missing: {path}")
+    mtime = path.stat().st_mtime
+    key = str(path.resolve())
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached and cached[0] == mtime:
+            return list(cached[1])
+
     out: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip() or line.strip().startswith("#"):
@@ -27,8 +38,16 @@ def load_proxies(path: Path) -> list[str]:
         out.append(parse_proxy_line(line))
     if not out:
         raise RuntimeError(f"no proxies in {path}")
-    return out
+
+    with _cache_lock:
+        _cache[key] = (mtime, out)
+    return list(out)
 
 
 def pick_proxy(path: Path) -> str:
-    return random.choice(load_proxies(path))
+    proxies = load_proxies(path)
+    global _rr_idx
+    with _cache_lock:
+        proxy = proxies[_rr_idx % len(proxies)]
+        _rr_idx += 1
+    return proxy

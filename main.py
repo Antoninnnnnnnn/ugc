@@ -10,13 +10,12 @@ from dataclasses import replace
 
 from ugc_flow.captcha import get_balance
 from ugc_flow.config import ROOT, Settings, load_settings, proxy_count
-from ugc_flow.mailer import check_login, check_pasted_link, recent_headers
+from ugc_flow.mailer import SharedMailbox, check_login, check_pasted_link, recent_headers
 from ugc_flow.profile import dot_alias
-from ugc_flow.runner import Account, export_accounts, join_existing, list_accounts, run_one
+from ugc_flow.runner import Account, append_account, export_accounts, join_existing, list_accounts, run_one
 
 EXPORT_FILE = ROOT / "accounts.csv"
-MAX_THREADS = 5
-STAGGER_SEC = 3.0
+STAGGER_SEC = 0.5
 
 os.system("")
 G, R, Y, C, D, B, X = (f"\033[{c}m" for c in ("92", "91", "93", "96", "2", "1", "0"))
@@ -37,12 +36,17 @@ def ask(prompt: str, default: str = "") -> str:
     return val or default
 
 
-def ask_int(prompt: str, default: int, lo: int, hi: int) -> int:
+def ask_int(prompt: str, default: int, lo: int = 1, hi: int | None = None) -> int:
     while True:
         raw = ask(prompt, str(default))
-        if raw.isdigit() and lo <= int(raw) <= hi:
-            return int(raw)
-        say(f"{R}Entre un nombre entre {lo} et {hi}.{X}")
+        if raw.isdigit():
+            val = int(raw)
+            if val >= lo and (hi is None or val <= hi):
+                return val
+        if hi is not None:
+            say(f"{R}Entre un nombre entre {lo} et {hi}.{X}")
+        else:
+            say(f"{R}Entre un nombre supérieur ou égal à {lo}.{X}")
 
 
 # ---------------------------------------------------------------- actions
@@ -68,11 +72,15 @@ def modes(settings: Settings) -> str:
     else:
         why = "désactivé" if settings.proxy_available else "aucun proxy trouvé"
         proxy = f"{Y}connexion directe{X} {D}({why}){X}"
-    if settings.use_imap:
-        mail = f"{G}IMAP auto{X}"
+    labels = {"imap": "IMAP", "pop3": "POP3", "manual": "lien saisi"}
+    if settings.fetches_mail:
+        try:
+            host, _port = settings.endpoint()
+        except ValueError as exc:
+            host = str(exc)
+        mail = f"{G}{labels[settings.mail_protocol]}{X} {D}({settings.imap_user} @ {host}){X}"
     else:
-        why = "désactivé" if settings.imap_available else "pas de mot de passe IMAP"
-        mail = f"{Y}lien collé à la main{X} {D}({why}){X}"
+        mail = f"{Y}saisie manuelle du lien{X}"
     return f"réseau : {proxy}   mail : {mail}"
 
 
@@ -82,12 +90,15 @@ def plan_emails(settings: Settings, count: int) -> list[str | None]:
         return [None] * count
     base = settings.imap_user.strip()
     if "@" not in base:
-        say(f"{R}Pas de domaine catch-all et pas d'adresse dans IMAP_USER.{X}")
+        say(f"{R}Pas de domaine catch-all et pas d'adresse dans MAIL_USER.{X}")
         return []
     say(f"\n{Y}Pas de domaine catch-all.{X}")
     say(f"Le premier compte utilise l'adresse complète : {B}{base}{X}")
     emails: list[str | None] = [base]
     if count == 1:
+        return emails
+    if not base.lower().endswith(("@gmail.com", "@googlemail.com")):
+        say(f"{Y}Un seul compte : les alias avec des points ne fonctionnent que pour Gmail.{X}")
         return emails
     use_dots = ask(
         "Utiliser des alias avec des points pour les comptes suivants ? (o/n)", "o"
@@ -110,27 +121,47 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
     if not emails:
         return
     count = len(emails)
-    manual = not settings.use_imap
-    threads = max(1, min(threads, MAX_THREADS, count))
+    manual = not settings.fetches_mail
+    threads = max(1, min(threads, count))
     if manual and threads > 1:
-        say(f"{Y}Lien à coller à la main : un compte à la fois.{X}")
+        say(f"{Y}Saisie manuelle du lien : un compte à la fois.{X}")
         threads = 1
     say(f"\n{B}Création de {count} compte(s), {threads} en parallèle{X}")
     say(f"{D}{modes(settings)}{X}\n")
     started = time.time()
     ok = 0
     stop = threading.Event()
+    csv_lock = threading.Lock()
+
+    shared_box: SharedMailbox | None = None
+    if settings.fetches_mail:
+        try:
+            host, _port = settings.endpoint()
+            shared_box = SharedMailbox(
+                settings.mail_protocol,
+                host,
+                settings.imap_user,
+                settings.imap_password,
+                pause_sec=3.0,
+            )
+            shared_box.start()
+        except Exception as exc:
+            say(f"{Y}Avertissement surveillance mail partagée : {exc}{X}")
+            shared_box = None
 
     def worker(idx: int) -> dict:
         if stop.is_set():
             return {"ok": False, "error": "annulé"}
         tag = f"{D}[{idx:02d}/{count:02d}]{X}"
         t0 = time.time()
+        target_email = emails[idx - 1]
+        mailbox = shared_box.client(target_email, settings.imap_timeout_sec) if shared_box and target_email else None
         res = run_one(
             settings,
             on_step=lambda s: say(f"{tag} {s}…"),
             ask_link=prompt_link if manual else None,
-            email=emails[idx - 1],
+            email=target_email,
+            mailbox=mailbox,
         )
         res["_elapsed"] = time.time() - t0
         res["_tag"] = tag
@@ -138,37 +169,51 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
 
     def report(res: dict) -> None:
         nonlocal ok
-        export_accounts(list_accounts(settings.runs_dir), EXPORT_FILE)
         tag, secs = res.get("_tag", ""), res.get("_elapsed", 0)
         net = f"{res['proxy_kb']} Ko proxy" if res.get("proxy") and "proxy_kb" in res else "direct"
         if res.get("ok"):
             ok += 1
+            acc = Account(
+                run_id=res.get("run_id", ""),
+                email=res.get("email", ""),
+                password=res.get("password", ""),
+                ok=True,
+                fid_points=res.get("fid_points"),
+                activated=True,
+                error="",
+            )
+            with csv_lock:
+                append_account(acc, EXPORT_FILE)
             say(f"{tag} {G}OK{X} {res['email']}  fidélité ✓  {D}({secs:.0f}s, {net}){X}")
         elif res.get("error") != "annulé":
             say(f"{tag} {R}ÉCHEC{X} {res.get('email', '')}  {res.get('error')}  {D}({secs:.0f}s){X}")
 
-    if threads == 1:
-        try:
-            for i in range(1, count + 1):
-                report(worker(i))
-        except KeyboardInterrupt:
-            say(f"\n{Y}Arrêté.{X}")
-    else:
-        pool = ThreadPoolExecutor(max_workers=threads)
-        futures = []
-        try:
-            for i in range(1, count + 1):
-                futures.append(pool.submit(worker, i))
-                if i < count and i <= threads:
-                    time.sleep(STAGGER_SEC)
-            for fut in as_completed(futures):
-                report(fut.result())
-        except KeyboardInterrupt:
-            stop.set()
-            say(f"\n{Y}Arrêt demandé : on termine les comptes déjà en cours…{X}")
-            pool.shutdown(wait=True, cancel_futures=True)
-        finally:
-            pool.shutdown(wait=True)
+    try:
+        if threads == 1:
+            try:
+                for i in range(1, count + 1):
+                    report(worker(i))
+            except KeyboardInterrupt:
+                say(f"\n{Y}Arrêté.{X}")
+        else:
+            pool = ThreadPoolExecutor(max_workers=threads)
+            futures = []
+            try:
+                for i in range(1, count + 1):
+                    futures.append(pool.submit(worker, i))
+                    if i < count and i <= threads:
+                        time.sleep(STAGGER_SEC)
+                for fut in as_completed(futures):
+                    report(fut.result())
+            except KeyboardInterrupt:
+                stop.set()
+                say(f"\n{Y}Arrêt demandé : on termine les comptes déjà en cours…{X}")
+                pool.shutdown(wait=True, cancel_futures=True)
+            finally:
+                pool.shutdown(wait=True)
+    finally:
+        if shared_box:
+            shared_box.stop()
 
     total = time.time() - started
     say(f"\n{B}Terminé : {G}{ok}{X}{B}/{count} compte(s) OK en {total:.0f}s{X}")
@@ -202,7 +247,7 @@ def export(settings: Settings) -> None:
 def finish_join(settings: Settings) -> None:
     pending = [a for a in list_accounts(settings.runs_dir) if a.activated and not a.ok]
     if not pending:
-        say(f"{Y}Aucun compte activé sans fidélité.{X}")
+        say(f"{Y}Aucun compte activé en attente d'adhésion.{X}")
         return
     for i, a in enumerate(pending, 1):
         say(f"{i:>3}  {a.email}")
@@ -219,14 +264,15 @@ def finish_join(settings: Settings) -> None:
 
 
 def mailbox(settings: Settings) -> None:
-    if not settings.imap_available:
-        say(f"{Y}Pas d'identifiants IMAP dans .env (IMAP_USER / IMAP_APP_PASSWORD).{X}")
+    if not settings.imap_available or not settings.fetches_mail:
+        say(f"{Y}Boîte mail indisponible : protocole « {settings.mail_protocol} » ou identifiants absents.{X}")
         return
-    needle = ask("Filtre (vide = tous les mails UGC)", "ugc")
+    needle = ask("Filtre (vide = tous les mails)", "ugc")
     try:
-        lines = recent_headers(settings.imap_host, settings.imap_user, settings.imap_password, needle)
+        host, _port = settings.endpoint()
+        lines = recent_headers(settings.mail_protocol, host, settings.imap_user, settings.imap_password, needle)
     except Exception as exc:
-        say(f"{R}IMAP : {exc}{X}")
+        say(f"{R}{settings.mail_protocol.upper()} : {exc}{X}")
         return
     for line in lines[-40:]:
         say(f"  {line}")
@@ -245,14 +291,18 @@ def check_config(settings: Settings) -> None:
         say(f"  Captcha       : {settings.captcha_provider}  solde {col}{bal:.2f} ${X}")
     except Exception as exc:
         say(f"  Captcha       : {R}{exc}{X}")
+    if not settings.fetches_mail:
+        say(f"  Mail          : {Y}saisie manuelle du lien{X}")
+        return
     if not settings.imap_available:
-        say(f"  IMAP          : {Y}non configuré{X}")
+        say(f"  Mail          : {Y}MAIL_USER / MAIL_PASSWORD manquants{X}")
         return
     try:
-        check_login(settings.imap_host, settings.imap_user, settings.imap_password)
-        say(f"  IMAP          : {G}OK{X} ({settings.imap_user})")
+        host, _port = settings.endpoint()
+        check_login(settings.mail_protocol, host, settings.imap_user, settings.imap_password)
+        say(f"  Mail          : {G}{settings.mail_protocol.upper()} OK{X} ({settings.imap_user} @ {host})")
     except Exception as exc:
-        say(f"  IMAP          : {R}{exc}{X}")
+        say(f"  Mail          : {R}{exc}{X}")
 
 
 def settings_menu(settings: Settings) -> Settings:
@@ -261,8 +311,8 @@ def settings_menu(settings: Settings) -> Settings:
         say(f"  {modes(settings)}\n")
         say(f"  {C}1{X}) Proxy : {'ON' if settings.use_proxy else 'OFF'}"
             + ("" if settings.proxy_available else f" {D}(aucun proxy dans {settings.proxy_file.name}){X}"))
-        say(f"  {C}2{X}) Mail  : {'IMAP auto' if settings.use_imap else 'lien collé à la main'}"
-            + ("" if settings.imap_available else f" {D}(pas de mot de passe IMAP){X}"))
+        say(f"  {C}2{X}) Mail  : {settings.mail_protocol}"
+            + ("" if settings.imap_available or settings.mail_protocol == "manual" else f" {D}(identifiants manquants){X}"))
         say(f"  {C}0{X}) Retour")
         choice = ask("Choix", "0")
         if choice == "1":
@@ -271,10 +321,12 @@ def settings_menu(settings: Settings) -> Settings:
             else:
                 settings = replace(settings, use_proxy=not settings.use_proxy)
         elif choice == "2":
-            if not settings.use_imap and not settings.imap_available:
-                say(f"{R}Impossible : mets IMAP_USER / IMAP_APP_PASSWORD dans .env.{X}")
+            order = ("imap", "pop3", "manual")
+            nxt = order[(order.index(settings.mail_protocol) + 1) % len(order)] if settings.mail_protocol in order else "manual"
+            if nxt != "manual" and not settings.imap_available:
+                say(f"{R}Impossible : mets MAIL_USER et MAIL_PASSWORD dans .env.{X}")
             else:
-                settings = replace(settings, use_imap=not settings.use_imap)
+                settings = replace(settings, mail_protocol=nxt)
         else:
             return settings
 
@@ -314,10 +366,10 @@ def interactive(settings: Settings) -> int:
         choice = ask("\nChoix", "1")
         try:
             if choice == "1":
-                n = ask_int("Combien de comptes", 1, 1, 500)
+                n = ask_int("Combien de comptes", 1, 1)
                 t = 1
-                if settings.use_imap and n > 1:
-                    t = ask_int(f"En parallèle (max {MAX_THREADS})", min(3, n), 1, MAX_THREADS)
+                if settings.fetches_mail and n > 1:
+                    t = ask_int("En parallèle", min(3, n), 1)
                 create_accounts(settings, n, t)
             elif choice == "2":
                 show_failed = ask("Afficher aussi les échecs ? (o/n)", "n").lower().startswith("o")
@@ -347,11 +399,11 @@ def main(argv: list[str] | None = None) -> int:
     p_create.add_argument("count", type=int, nargs="?", default=1)
     p_create.add_argument("-t", "--threads", type=int, default=3)
     p_create.add_argument("--no-proxy", action="store_true", help="connexion directe")
-    p_create.add_argument("--no-imap", action="store_true", help="coller le lien d'activation à la main")
+    p_create.add_argument("--no-imap", action="store_true", help="saisir le lien d'activation soi-même")
     p_list = sub.add_parser("list", help="lister les comptes")
     p_list.add_argument("-a", "--all", action="store_true", help="inclure les échecs")
     sub.add_parser("export", help="exporter les comptes OK dans accounts.csv")
-    sub.add_parser("check", help="vérifier proxies / captcha / IMAP")
+    sub.add_parser("check", help="vérifier proxies, captcha et boîte mail")
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -360,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.no_proxy:
                 settings = replace(settings, use_proxy=False)
             if args.no_imap:
-                settings = replace(settings, use_imap=False)
+                settings = replace(settings, mail_protocol="manual")
             create_accounts(settings, max(1, args.count), args.threads)
         elif args.cmd == "list":
             show_accounts(settings, args.all)
