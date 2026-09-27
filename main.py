@@ -11,7 +11,7 @@ from dataclasses import replace
 from ugc_flow.captcha import get_balance
 from ugc_flow.config import ROOT, Settings, load_settings, proxy_count
 from ugc_flow.mailer import SharedMailbox, check_login, check_pasted_link, recent_headers
-from ugc_flow.profile import dot_alias
+from ugc_flow.profile import dot_alias, parse_emails
 from ugc_flow.runner import Account, append_account, export_accounts, join_existing, list_accounts, run_one
 
 EXPORT_FILE = ROOT / "accounts.csv"
@@ -80,12 +80,49 @@ def modes(settings: Settings) -> str:
             host = str(exc)
         mail = f"{G}{labels[settings.mail_protocol]}{X} {D}({settings.imap_user} @ {host}){X}"
     else:
-        mail = f"{Y}saisie manuelle du lien{X}"
+        mail = f"{Y}adresses à coller{X}"
     return f"réseau : {proxy}   mail : {mail}"
+
+
+def prompt_addresses(settings: Settings) -> list[str]:
+    """Sans IMAP ni POP3 : les adresses viennent de ce qui est collé ici."""
+    say(f"\n{Y}Aucune boîte mail dans .env.{X}")
+    say("Colle les adresses des comptes à créer, une par ligne ou séparées par des virgules.")
+    say(f"{D}Ligne vide pour terminer.{X}")
+    chunks: list[str] = []
+    while True:
+        line = ask("Adresse")
+        if not line:
+            break
+        chunks.append(line)
+    emails = parse_emails("\n".join(chunks))
+    if not emails:
+        say(f"{R}Aucune adresse reconnue.{X}")
+        return []
+    taken = {
+        a.email.lower()
+        for a in list_accounts(settings.runs_dir)
+        if a.ok or a.activated
+    }
+    fresh = []
+    for addr in emails:
+        if addr in taken:
+            say(f"{Y}{addr} a déjà un compte, ignorée.{X}")
+            continue
+        fresh.append(addr)
+    if not fresh:
+        say(f"{R}Toutes ces adresses ont déjà un compte.{X}")
+        return []
+    shown = ", ".join(fresh[:8])
+    extra = f" … +{len(fresh) - 8}" if len(fresh) > 8 else ""
+    say(f"{D}{len(fresh)} adresse(s) : {shown}{extra}{X}")
+    return fresh
 
 
 def plan_emails(settings: Settings, count: int) -> list[str | None]:
     """None = adresse catch-all aléatoire. Sinon l'adresse Gmail, puis des alias à points."""
+    if not settings.fetches_mail:
+        return prompt_addresses(settings)
     if settings.catchall_domains:
         return [None] * count
     base = settings.imap_user.strip()
@@ -358,6 +395,8 @@ MENU = [
 
 
 def interactive(settings: Settings) -> int:
+    if not settings.fetches_mail:
+        create_accounts(settings, 1, 1)
     while True:
         header(settings)
         say()
@@ -366,11 +405,14 @@ def interactive(settings: Settings) -> int:
         choice = ask("\nChoix", "1")
         try:
             if choice == "1":
-                n = ask_int("Combien de comptes", 1, 1)
-                t = 1
-                if settings.fetches_mail and n > 1:
-                    t = ask_int("En parallèle", min(3, n), 1)
-                create_accounts(settings, n, t)
+                if settings.fetches_mail:
+                    n = ask_int("Combien de comptes", 1, 1)
+                    t = 1
+                    if n > 1:
+                        t = ask_int("En parallèle", min(3, n), 1)
+                    create_accounts(settings, n, t)
+                else:
+                    create_accounts(settings, 1, 1)
             elif choice == "2":
                 show_failed = ask("Afficher aussi les échecs ? (o/n)", "n").lower().startswith("o")
                 show_accounts(settings, show_failed)

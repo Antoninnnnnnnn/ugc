@@ -119,6 +119,13 @@ def test_settings_modes(tmp_path, monkeypatch):
     assert s.proxy_source is None and not s.use_imap
 
 
+def test_parse_emails_from_a_paste():
+    from ugc_flow.profile import parse_emails
+
+    text = "A.B@gmail.com, autre@gmail.com\nA.B@gmail.com; third@outlook.fr"
+    assert parse_emails(text) == ["a.b@gmail.com", "autre@gmail.com", "third@outlook.fr"]
+
+
 def test_dot_alias_same_mailbox():
     from ugc_flow.profile import dot_alias, gmail_base
 

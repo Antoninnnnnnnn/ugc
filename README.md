@@ -26,7 +26,7 @@ Remplis `.env` :
 | `CATCHALL_DOMAINS` | Optionnel. Domaines catch-all, séparés par des virgules. Vide : le premier compte reprend `MAIL_USER`. Avec Gmail, le script peut ensuite proposer des alias (points dans la partie locale) |
 | `MAIL_USER` | Adresse de la boîte qui reçoit les mails d’activation |
 | `MAIL_PASSWORD` | Mot de passe, ou mot de passe d’application (Gmail, Outlook). Les espaces sont ignorés |
-| `MAIL_PROTOCOL` | `auto`, `imap`, `pop3` ou `manual`. `auto` choisit IMAP si `MAIL_USER` et `MAIL_PASSWORD` sont renseignés, sinon la saisie du lien |
+| `MAIL_PROTOCOL` | `auto`, `imap`, `pop3` ou `manual`. `auto` : IMAP si les identifiants sont remplis, sinon demande des adresses au lancement |
 | `CAPTCHA_API_KEY` | Clé CapMonster Cloud |
 
 Le captcha du site est Friendly Captcha **v2**. CapSolver ne produit que des jetons v1, que UGC refuse. Le fournisseur attendu est CapMonster (`CAPTCHA_PROVIDER=capmonster`).
@@ -41,7 +41,9 @@ http://host:port:utilisateur:motdepasse
 
 `USE_PROXY=auto` : le proxy est utilisé s’il y a des lignes dans `proxy.txt`. `0` force la connexion directe.
 
-L’hôte mail est déduit de l’adresse : Gmail, Outlook, Hotmail, Yahoo, iCloud, GMX, Orange, Free, La Poste, SFR. Pour un autre fournisseur, indique `MAIL_HOST`. Le menu (choix 7) passe d’IMAP à POP3, puis à la saisie manuelle du lien. Sans identifiants, le script demande ce lien.
+L’hôte mail est déduit de l’adresse : Gmail, Outlook, Hotmail, Yahoo, iCloud, GMX, Orange, Free, La Poste, SFR. Pour un autre fournisseur, indique `MAIL_HOST`. Le menu (choix 7) passe d’IMAP à POP3, puis à la saisie manuelle.
+
+Si `MAIL_USER` et `MAIL_PASSWORD` sont vides, `py main.py` demande tout de suite les adresses à coller, puis le lien d’activation de chacune. Une ligne vide revient au menu.
 
 ## Lancer
 
@@ -51,7 +53,7 @@ py main.py
 
 | Choix | Action |
 |---|---|
-| 1 | Créer des comptes. En IMAP ou POP3, plusieurs en parallèle. En saisie manuelle du lien, un seul à la fois |
+| 1 | Créer des comptes. En IMAP ou POP3, plusieurs en parallèle. Sans lecture du mail, coller les adresses, puis le lien de chacune, un compte à la fois |
 | 2 | Voir les comptes (e-mail, mot de passe, points). Les échecs sont masqués par défaut |
 | 3 | Exporter les comptes OK dans `accounts.csv` |
 | 4 | Terminer l’adhésion d’un compte déjà activé, pas encore inscrit au programme |
@@ -63,7 +65,7 @@ Les mêmes actions en ligne de commande :
 
 ```bash
 py main.py create 10 -t 3    # 10 comptes, 3 en parallèle
-py main.py create 1 --no-proxy --no-imap
+py main.py create --no-imap          # demande les adresses, puis chaque lien
 py main.py list              # ajouter -a pour voir les échecs
 py main.py export
 py main.py check

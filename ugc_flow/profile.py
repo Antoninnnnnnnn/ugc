@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 import secrets
 import string
 import uuid
@@ -29,6 +30,18 @@ class Person:
     phone: str
     postal: str
     city: str
+
+
+def parse_emails(text: str) -> list[str]:
+    """Adresses collées d'un bloc : virgules, points-virgules, espaces ou retours à la ligne."""
+    found = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", text.lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for addr in found:
+        if addr not in seen:
+            seen.add(addr)
+            out.append(addr)
+    return out
 
 
 def gmail_base(email: str) -> str:
