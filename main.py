@@ -15,7 +15,6 @@ from ugc_flow.profile import dot_alias, parse_emails
 from ugc_flow.runner import Account, append_account, export_accounts, join_existing, list_accounts, run_one
 
 EXPORT_FILE = ROOT / "accounts.csv"
-STAGGER_SEC = 0.5
 
 os.system("")
 G, R, Y, C, D, B, X = (f"\033[{c}m" for c in ("92", "91", "93", "96", "2", "1", "0"))
@@ -192,13 +191,12 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
         tag = f"{D}[{idx:02d}/{count:02d}]{X}"
         t0 = time.time()
         target_email = emails[idx - 1]
-        mailbox = shared_box.client(target_email, settings.imap_timeout_sec) if shared_box and target_email else None
         res = run_one(
             settings,
-            on_step=lambda s: say(f"{tag} {s}…"),
+            on_step=lambda s, _tag=tag: say(f"{_tag} {s}…"),
             ask_link=prompt_link if manual else None,
             email=target_email,
-            mailbox=mailbox,
+            shared=shared_box,
         )
         res["_elapsed"] = time.time() - t0
         res["_tag"] = tag
@@ -238,8 +236,6 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
             try:
                 for i in range(1, count + 1):
                     futures.append(pool.submit(worker, i))
-                    if i < count and i <= threads:
-                        time.sleep(STAGGER_SEC)
                 for fut in as_completed(futures):
                     report(fut.result())
             except KeyboardInterrupt:

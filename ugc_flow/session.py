@@ -19,12 +19,16 @@ class UgcSession:
         self.base = base.rstrip("/")
         self.dump_dir = dump_dir
         self.dump_dir.mkdir(parents=True, exist_ok=True)
+        self.proxy_file = proxy_file
         self._n = 0
         self.traffic: list[tuple[str, int, int]] = []
         self.last_join_location = ""
         self.referer = f"{self.base}/login.html"
         self.proxy = pick_proxy(proxy_file) if proxy_file else None
-        self.client = httpx.Client(
+        self.client = self._open_client()
+
+    def _open_client(self) -> httpx.Client:
+        return httpx.Client(
             proxy=self.proxy,
             follow_redirects=True,
             timeout=httpx.Timeout(45.0, connect=20.0),
@@ -38,6 +42,12 @@ class UgcSession:
                 "sec-ch-ua-platform": '"Windows"',
             },
         )
+
+    def _rotate_proxy(self) -> None:
+        self.client.close()
+        if self.proxy_file:
+            self.proxy = pick_proxy(self.proxy_file)
+        self.client = self._open_client()
 
     def close(self) -> None:
         self.client.close()
@@ -80,11 +90,26 @@ class UgcSession:
         return self.base + path
 
     def get(self, path: str, name: str, *, follow: bool = True) -> httpx.Response:
-        r = self.client.get(self.url(path), headers={"Referer": self.referer}, follow_redirects=follow)
-        self._account(name, r)
-        self.referer = str(r.url)
-        self.dump(name, r.text)
-        return r
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                r = self.client.get(self.url(path), headers={"Referer": self.referer}, follow_redirects=follow)
+            except httpx.TransportError as exc:
+                last = exc
+                if attempt == 2 or not self.proxy_file:
+                    raise
+                self._rotate_proxy()
+                continue
+            if r.status_code in (403, 502, 503) and attempt < 2 and self.proxy_file:
+                self._rotate_proxy()
+                continue
+            self._account(name, r)
+            self.referer = str(r.url)
+            self.dump(name, r.text)
+            return r
+        if last:
+            raise last
+        raise RuntimeError(f"GET {path} échoué")
 
     def post(
         self,

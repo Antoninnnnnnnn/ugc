@@ -26,11 +26,12 @@ def run_one(
     ask_link: LinkPrompt | None = None,
     email: str | None = None,
     mailbox: Mailbox | None = None,
+    shared=None,
 ) -> dict:
     run_id = new_run_id()
     dump_dir = settings.runs_dir / run_id
     try:
-        result = run_signup(settings, dump_dir, on_step, ask_link, email, mailbox=mailbox)
+        result = run_signup(settings, dump_dir, on_step, ask_link, email, mailbox=mailbox, shared=shared)
     except Exception as exc:
         result = {"ok": False, "error": repr(exc)}
     dump_dir.mkdir(parents=True, exist_ok=True)

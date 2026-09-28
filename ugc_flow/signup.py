@@ -44,6 +44,7 @@ def run_signup(
     ask_link: LinkPrompt | None = None,
     email: str | None = None,
     mailbox: Mailbox | None = None,
+    shared=None,
 ) -> dict:
     """ask_link(email) est appelé quand le protocole est « manual »."""
     step = on_step or (lambda _s: None)
@@ -52,7 +53,9 @@ def run_signup(
     person = make_person(settings.catchall_domains, email)
     dump_dir.mkdir(parents=True, exist_ok=True)
     _write_creds(dump_dir, person)
-    if mailbox is not None:
+    if shared is not None:
+        box = shared.client(person.email, settings.imap_timeout_sec)
+    elif mailbox is not None:
         box = mailbox
     else:
         host, _port = ("", 0)

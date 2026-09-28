@@ -424,6 +424,8 @@ class SharedMailbox:
         self.error: str | None = None
         self.last_error: str | None = None
         self.ok_polls = 0
+        self._auth_fails = 0
+        self._imap = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -436,6 +438,17 @@ class SharedMailbox:
         with self._lock:
             for ev in self._listeners.values():
                 ev.set()
+        self._close_imap()
+
+    def _close_imap(self) -> None:
+        mail = self._imap
+        self._imap = None
+        if mail is None:
+            return
+        try:
+            mail.logout()
+        except Exception:
+            pass
 
     def register(self, email: str) -> None:
         key = email.lower()
@@ -522,17 +535,21 @@ class SharedMailbox:
 
     def _fetch_imap(self, seen: set[str]) -> list[tuple[str, Message]]:
         out: list[tuple[str, Message]] = []
-        mail = _login_imap(self.host, self.user, self.password)
+        if self._imap is None:
+            self._imap = _login_imap(self.host, self.user, self.password)
+            self._imap.select("INBOX", readonly=True)
+        mail = self._imap
         try:
-            mail.select("INBOX", readonly=True)
             since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
             typ, data = mail.uid("SEARCH", f"(SINCE {since})")
             if typ != "OK" or not data or not data[0]:
                 return out
-            for uid in data[0].split()[-60:]:
+            pending: list[str] = []
+            for uid in data[0].split():
                 key = uid.decode() if isinstance(uid, bytes) else str(uid)
-                if key in seen:
-                    continue
+                if key not in seen:
+                    pending.append(key)
+            for key in pending[-200:]:
                 typ, fetched = mail.uid(
                     "FETCH", key, "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DELIVERED-TO X-ORIGINAL-TO CC)])"
                 )
@@ -554,12 +571,10 @@ class SharedMailbox:
                 raw = _imap_literal(fetched)
                 if raw:
                     out.append((key, email_lib.message_from_bytes(raw)))
-        finally:
-            try:
-                mail.logout()
-            except Exception:
-                pass
-        return out
+            return out
+        except Exception:
+            self._close_imap()
+            raise
 
     def _fetch_pop3(self, seen: set[str]) -> list[tuple[str, Message]]:
         out: list[tuple[str, Message]] = []
@@ -613,13 +628,21 @@ class SharedMailbox:
                     seen.add(mid)
                     self._process_message(msg)
             except Exception as exc:
+                self._close_imap()
                 if _is_auth_failure(exc):
-                    self.error = str(exc)
-                    with self._lock:
-                        for ev in self._listeners.values():
-                            ev.set()
-                    return
-                self.last_error = str(exc)
+                    self._auth_fails += 1
+                    self.last_error = str(exc)
+                    if self.ok_polls == 0 and self._auth_fails >= 4:
+                        self.error = str(exc)
+                        with self._lock:
+                            for ev in self._listeners.values():
+                                ev.set()
+                        return
+                else:
+                    self._auth_fails = 0
+                    self.last_error = str(exc)
+            else:
+                self._auth_fails = 0
             self._stop.wait(self.pause_sec)
 
 
