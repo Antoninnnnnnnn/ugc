@@ -119,6 +119,24 @@ def test_settings_modes(tmp_path, monkeypatch):
     assert s.proxy_source is None and not s.use_imap
 
 
+def test_outlook_without_password_stays_on_imap(monkeypatch, tmp_path):
+    from ugc_flow import config
+
+    monkeypatch.setattr(config, "load_dotenv", lambda *_a, **_k: None)
+    monkeypatch.setenv("PROXY_FILE", str(tmp_path / "none.txt"))
+    monkeypatch.setenv("IMAP_USER", "")
+    monkeypatch.setenv("IMAP_APP_PASSWORD", "")
+    monkeypatch.setenv("MAIL_USER", "a@outlook.fr")
+    monkeypatch.setenv("MAIL_PASSWORD", "")
+    monkeypatch.setenv("MAIL_PROTOCOL", "auto")
+    monkeypatch.setenv("MAIL_HOST", "")
+    monkeypatch.delenv("USE_IMAP", raising=False)
+    s = config.load_settings()
+    assert s.mail_protocol == "imap"
+    assert s.imap_available
+    assert s.endpoint() == ("outlook.office365.com", 993)
+
+
 def test_parse_emails_from_a_paste():
     from ugc_flow.profile import parse_emails
 

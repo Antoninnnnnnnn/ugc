@@ -44,10 +44,32 @@ class UgcSession:
         )
 
     def _rotate_proxy(self) -> None:
+        saved = [(c.name, c.value, c.domain, c.path) for c in self.client.cookies.jar]
         self.client.close()
         if self.proxy_file:
             self.proxy = pick_proxy(self.proxy_file)
         self.client = self._open_client()
+        for name, value, domain, path in saved:
+            self.client.cookies.set(name, value, domain=domain, path=path)
+
+    def _send(self, call) -> httpx.Response:
+        last: Exception | None = None
+        for attempt in range(5):
+            try:
+                response = call()
+            except httpx.TransportError as exc:
+                last = exc
+                if attempt == 4 or not self.proxy_file:
+                    raise
+                self._rotate_proxy()
+                continue
+            if response.status_code in (502, 503) and attempt < 4 and self.proxy_file:
+                self._rotate_proxy()
+                continue
+            return response
+        if last:
+            raise last
+        raise RuntimeError("requête échouée")
 
     def close(self) -> None:
         self.client.close()
@@ -90,26 +112,17 @@ class UgcSession:
         return self.base + path
 
     def get(self, path: str, name: str, *, follow: bool = True) -> httpx.Response:
-        last: Exception | None = None
-        for attempt in range(3):
-            try:
-                r = self.client.get(self.url(path), headers={"Referer": self.referer}, follow_redirects=follow)
-            except httpx.TransportError as exc:
-                last = exc
-                if attempt == 2 or not self.proxy_file:
-                    raise
-                self._rotate_proxy()
-                continue
-            if r.status_code in (403, 502, 503) and attempt < 2 and self.proxy_file:
-                self._rotate_proxy()
-                continue
-            self._account(name, r)
-            self.referer = str(r.url)
-            self.dump(name, r.text)
-            return r
-        if last:
-            raise last
-        raise RuntimeError(f"GET {path} échoué")
+        def call() -> httpx.Response:
+            return self.client.get(self.url(path), headers={"Referer": self.referer}, follow_redirects=follow)
+
+        r = self._send(call)
+        if r.status_code == 403 and self.proxy_file:
+            self._rotate_proxy()
+            r = self._send(call)
+        self._account(name, r)
+        self.referer = str(r.url)
+        self.dump(name, r.text)
+        return r
 
     def post(
         self,
@@ -136,7 +149,10 @@ class UgcSession:
             headers["Sec-Fetch-Dest"] = "document"
             headers["Sec-Fetch-Mode"] = "navigate"
             headers["Sec-Fetch-User"] = "?1"
-        r = self.client.post(target, data=data, headers=headers, follow_redirects=follow)
+        def call() -> httpx.Response:
+            return self.client.post(target, data=data, headers=headers, follow_redirects=follow)
+
+        r = self._send(call)
         self._account(name, r)
         self.referer = str(r.url)
         self.dump(name, r.text)

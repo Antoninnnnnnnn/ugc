@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from ugc_flow.mailer import resolve_host
+from ugc_flow.mailer import resolve_host, uses_xoauth2
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,7 +36,11 @@ class Settings:
 
     @property
     def imap_available(self) -> bool:
-        return bool(self.imap_user and self.imap_password)
+        if not self.imap_user:
+            return False
+        if self.imap_password:
+            return True
+        return uses_xoauth2(self.mail_host_override, self.imap_user)
 
     @property
     def use_imap(self) -> bool:
@@ -77,7 +81,8 @@ def _mail_protocol(user: str, password: str) -> str:
         return raw
     if not _mode("USE_IMAP", True):
         return "manual"
-    if user and password:
+    host = os.getenv("MAIL_HOST", "").strip()
+    if user and (password or uses_xoauth2(host, user)):
         return "imap"
     return "manual"
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Callable
 
@@ -15,6 +18,36 @@ from ugc_flow.session import UA, UgcSession
 
 class SignupError(RuntimeError):
     pass
+
+
+# Au-delà, on ne se fie plus au jeton de connexion résolu pendant l'attente du mail.
+LOGIN_TOKEN_MAX_AGE = 180
+
+
+def _in_background(fn: Callable[[], str]) -> Future:
+    """Lance fn dans un thread. Le résultat est (valeur, heure de fin)."""
+    fut: Future = Future()
+
+    def run() -> None:
+        try:
+            fut.set_result((fn(), time.time()))
+        except BaseException as exc:
+            fut.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+    return fut
+
+
+def _fresh(fut: Future | None, max_age: float | None = None) -> str | None:
+    if fut is None:
+        return None
+    try:
+        token, born = fut.result()
+    except Exception:
+        return None
+    if max_age is not None and time.time() - born > max_age:
+        return None
+    return token
 
 
 def _write_creds(dump_dir: Path, person: Person) -> None:
@@ -78,6 +111,9 @@ def run_signup(
         with UgcSession(settings.ugc_base, settings.proxy_source, dump_dir) as sess:
             step("inscription")
             _create_account(sess, settings, person, result)
+            login_token = _in_background(
+                lambda: _solve(sess, settings, f"{settings.ugc_base}/login.html")
+            )
 
             step("attente mail" if settings.fetches_mail else "lien d'activation à coller")
             try:
@@ -95,7 +131,13 @@ def run_signup(
             result["activated"] = True
 
             step("connexion")
-            _login(sess, settings, person, result.pop("csrf", None))
+            early = _fresh(login_token, LOGIN_TOKEN_MAX_AGE)
+            try:
+                _login(sess, settings, person, result.pop("csrf", None), token=early)
+            except SignupError:
+                if early is None:
+                    raise
+                _login(sess, settings, person, None)
             result["logged_in"] = True
 
             step("fidélité")
@@ -125,6 +167,9 @@ def run_signup(
 
 
 def _create_account(sess: UgcSession, settings: Settings, person: Person, result: dict) -> None:
+    token = _in_background(
+        lambda: _solve(sess, settings, f"{settings.ugc_base}/inscription.html")
+    )
     login = sess.get("/login.html", "login")
     if login.status_code >= 400:
         raise SignupError(f"GET login.html HTTP {login.status_code}")
@@ -150,7 +195,7 @@ def _create_account(sess: UgcSession, settings: Settings, person: Person, result
         "inscriptionBean.confirm": person.password,
         "inscriptionBean.checked": "on",
         "inscriptionBean.seizeAns": "on",
-        "frc-captcha-response": _solve(sess, settings, f"{settings.ugc_base}/inscription.html"),
+        "frc-captcha-response": token.result()[0],
     }
     posted = sess.post("/monCompteInscriptionAction!inscription", "inscription-submit", payload)
     errs = struts_errors(posted.text)
@@ -161,7 +206,14 @@ def _create_account(sess: UgcSession, settings: Settings, person: Person, result
     result["signup_accepted"] = True
 
 
-def _login(sess: UgcSession, settings: Settings, person: Person, csrf: str | None = None) -> None:
+def _login(
+    sess: UgcSession,
+    settings: Settings,
+    person: Person,
+    csrf: str | None = None,
+    *,
+    token: str | None = None,
+) -> None:
     if not csrf:
         page = sess.get("/login.html", "login-refresh")
         csrf = hidden_csrf(page.text)
@@ -173,7 +225,7 @@ def _login(sess: UgcSession, settings: Settings, person: Person, csrf: str | Non
         "j_username": person.email,
         "j_password": person.password,
         "remember-me": "on",
-        "frc-captcha-response": _solve(sess, settings, f"{settings.ugc_base}/login.html"),
+        "frc-captcha-response": token or _solve(sess, settings, f"{settings.ugc_base}/login.html"),
     }
     r = sess.post("/j_spring_security_check", "spring-login", data, follow=False)
     # Suivre les 302 pour récupérer les cookies SSO, sans télécharger la page profil (~75 Ko).

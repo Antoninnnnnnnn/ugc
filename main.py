@@ -10,7 +10,7 @@ from dataclasses import replace
 
 from ugc_flow.captcha import get_balance
 from ugc_flow.config import ROOT, Settings, load_settings, proxy_count
-from ugc_flow.mailer import SharedMailbox, check_login, check_pasted_link, recent_headers
+from ugc_flow.mailer import SharedMailbox, check_login, check_pasted_link, prepare_imap, recent_headers, uses_xoauth2
 from ugc_flow.profile import dot_alias, parse_emails
 from ugc_flow.runner import Account, append_account, export_accounts, join_existing, list_accounts, run_one
 
@@ -158,7 +158,7 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
         return
     count = len(emails)
     manual = not settings.fetches_mail
-    threads = max(1, min(threads, count))
+    threads = count if threads <= 0 else max(1, min(threads, count))
     if manual and threads > 1:
         say(f"{Y}Saisie manuelle du lien : un compte à la fois.{X}")
         threads = 1
@@ -173,17 +173,19 @@ def create_accounts(settings: Settings, count: int, threads: int) -> None:
     if settings.fetches_mail:
         try:
             host, _port = settings.endpoint()
+            if settings.mail_protocol == "imap":
+                prepare_imap(host, settings.imap_user)
             shared_box = SharedMailbox(
                 settings.mail_protocol,
                 host,
                 settings.imap_user,
                 settings.imap_password,
-                pause_sec=3.0,
+                pause_sec=1.0,
             )
             shared_box.start()
         except Exception as exc:
-            say(f"{Y}Avertissement surveillance mail partagée : {exc}{X}")
-            shared_box = None
+            say(f"{R}Boîte mail : {exc}{X}")
+            return
 
     def worker(idx: int) -> dict:
         if stop.is_set():
@@ -356,7 +358,9 @@ def settings_menu(settings: Settings) -> Settings:
         elif choice == "2":
             order = ("imap", "pop3", "manual")
             nxt = order[(order.index(settings.mail_protocol) + 1) % len(order)] if settings.mail_protocol in order else "manual"
-            if nxt != "manual" and not settings.imap_available:
+            if nxt == "pop3" and uses_xoauth2(settings.mail_host_override, settings.imap_user):
+                say(f"{R}Outlook n'accepte plus POP3. Reste en IMAP.{X}")
+            elif nxt != "manual" and not settings.imap_available:
                 say(f"{R}Impossible : mets MAIL_USER et MAIL_PASSWORD dans .env.{X}")
             else:
                 settings = replace(settings, mail_protocol=nxt)
@@ -405,7 +409,7 @@ def interactive(settings: Settings) -> int:
                     n = ask_int("Combien de comptes", 1, 1)
                     t = 1
                     if n > 1:
-                        t = ask_int("En parallèle", min(3, n), 1)
+                        t = ask_int("En parallèle (tous par défaut)", n, 1)
                     create_accounts(settings, n, t)
                 else:
                     create_accounts(settings, 1, 1)
@@ -435,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
     p_create = sub.add_parser("create", help="créer des comptes")
     p_create.add_argument("count", type=int, nargs="?", default=1)
-    p_create.add_argument("-t", "--threads", type=int, default=3)
+    p_create.add_argument("-t", "--threads", type=int, default=0, help="0 = tous en même temps")
     p_create.add_argument("--no-proxy", action="store_true", help="connexion directe")
     p_create.add_argument("--no-imap", action="store_true", help="saisir le lien d'activation soi-même")
     p_list = sub.add_parser("list", help="lister les comptes")

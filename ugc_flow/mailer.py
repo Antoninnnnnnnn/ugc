@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import email as email_lib
 import imaplib
+import os
 import poplib
 import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from email.header import decode_header, make_header
 from email.message import Message
 from urllib.parse import parse_qs, urlsplit
@@ -18,10 +20,12 @@ PRESETS: dict[str, tuple[str, str]] = {
     "gmail.com": ("imap.gmail.com", "pop.gmail.com"),
     "googlemail.com": ("imap.gmail.com", "pop.gmail.com"),
     "outlook.com": ("outlook.office365.com", "outlook.office365.com"),
+    "outlook.fr": ("outlook.office365.com", "outlook.office365.com"),
     "hotmail.com": ("outlook.office365.com", "outlook.office365.com"),
     "hotmail.fr": ("outlook.office365.com", "outlook.office365.com"),
     "live.com": ("outlook.office365.com", "outlook.office365.com"),
     "live.fr": ("outlook.office365.com", "outlook.office365.com"),
+    "msn.com": ("outlook.office365.com", "outlook.office365.com"),
     "yahoo.com": ("imap.mail.yahoo.com", "pop.mail.yahoo.com"),
     "yahoo.fr": ("imap.mail.yahoo.com", "pop.mail.yahoo.com"),
     "icloud.com": ("imap.mail.me.com", "imap.mail.me.com"),
@@ -138,6 +142,114 @@ def _is_auth_failure(exc: BaseException) -> bool:
     return any(hint in text for hint in ("auth", "login", "credential", "password", "mot de passe", "identifiant"))
 
 
+def _uid_bodies(fetched) -> list[tuple[str, bytes]]:
+    out: list[tuple[str, bytes]] = []
+    for item in fetched or []:
+        if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], (bytes, bytearray)):
+            continue
+        meta = item[0].decode("ascii", errors="replace") if isinstance(item[0], bytes) else str(item[0])
+        found = re.search(r"UID (\d+)", meta)
+        if found:
+            out.append((found.group(1), bytes(item[1])))
+    return out
+
+
+def _highest_uid(fetched) -> int:
+    best = 0
+    for item in fetched or []:
+        meta = item[0] if isinstance(item, tuple) else item
+        if isinstance(meta, bytes):
+            meta = meta.decode("ascii", errors="replace")
+        if not isinstance(meta, str):
+            continue
+        found = re.search(r"UID (\d+)", meta)
+        if found:
+            best = max(best, int(found.group(1)))
+    return best
+
+
+def _is_ugc_header(msg: Message) -> bool:
+    sender = _decode(msg.get("From")).lower()
+    try:
+        subject = str(make_header(decode_header(_decode(msg.get("Subject"))))).lower()
+    except Exception:
+        subject = _decode(msg.get("Subject")).lower()
+    return "ugcmailing" in sender or "confirmez" in subject or "mon compte" in subject
+
+
+def _imap_literals(fetched) -> list[bytes]:
+    out: list[bytes] = []
+    for item in fetched or []:
+        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], (bytes, bytearray)):
+            out.append(bytes(item[1]))
+    return out
+
+
+def activation_target(msg: Message) -> tuple[str, str] | None:
+    """(adresse, lien) si le message contient le lien d'activation UGC."""
+    link = activation_link(_body(msg) + " " + str(msg.get("Subject") or ""))
+    if not link:
+        return None
+    target = (parse_qs(urlsplit(link).query).get("emailCompte") or [""])[0].lower()
+    if not target:
+        return None
+    return target, link
+
+
+def load_activation_links(host: str, user: str, password: str, wanted: set[str], progress=None) -> dict[str, str]:
+    """Lit d'un coup les mails UGC déjà reçus. Une recherche, puis des téléchargements groupés."""
+    note = progress or (lambda _m: None)
+    links: dict[str, str] = {}
+    note("connexion IMAP")
+    mail = _login_imap(host, user, password)
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%d-%b-%Y")
+        for folder in ("INBOX", "[Gmail]/Spam", "[Gmail]/Tous les messages"):
+            if wanted and wanted <= {addr for addr, link in links.items() if "relance-activation" not in link}:
+                break
+            try:
+                typ, _ = mail.select(folder, readonly=True)
+            except imaplib.IMAP4.error:
+                continue
+            if typ != "OK":
+                continue
+            note(f"recherche dans {folder}")
+            typ, data = mail.uid("SEARCH", f'(SINCE {since} FROM "ugcmailing.fr" SUBJECT "Confirmez")')
+            if typ != "OK" or not data or not data[0]:
+                typ, data = mail.uid("SEARCH", f'(SINCE {since} FROM "ugcmailing.fr")')
+            if typ != "OK" or not data or not data[0]:
+                note(f"rien dans {folder}")
+                continue
+            uids = [u.decode() if isinstance(u, bytes) else str(u) for u in data[0].split()]
+            uids.reverse()
+            note(f"{len(uids)} mails dans {folder}")
+            for i in range(0, len(uids), 12):
+                if wanted and wanted <= {addr for addr, link in links.items() if "relance-activation" not in link}:
+                    break
+                chunk = ",".join(uids[i : i + 12])
+                typ, fetched = mail.uid("FETCH", chunk, "(BODY.PEEK[])")
+                if typ != "OK":
+                    continue
+                for raw in _imap_literals(fetched):
+                    found = activation_target(email_lib.message_from_bytes(raw))
+                    if not found:
+                        continue
+                    addr, link = found
+                    previous = links.get(addr)
+                    if previous is None or ("relance-activation" in previous and "relance-activation" not in link):
+                        links[addr] = link
+                ready = {addr for addr, link in links.items() if "relance-activation" not in link}
+                note(f"{len(ready)} liens d'origine")
+                if wanted and wanted <= ready:
+                    break
+        return links
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
 def _imap_literal(fetched) -> bytes:
     if not fetched or not fetched[0] or not isinstance(fetched[0], tuple):
         return b""
@@ -158,13 +270,90 @@ def pop_candidates(lines: list[bytes] | None, seen: set[str], limit: int = 40) -
     return pending[-limit:]
 
 
+# Comptes personnels Microsoft : IMAP n'accepte plus le mot de passe, seulement XOAUTH2.
+MICROSOFT_DOMAINS = frozenset(k for k, v in PRESETS.items() if v[0] == "outlook.office365.com")
+MICROSOFT_HOSTS = frozenset({"outlook.office365.com", "imap-mail.outlook.com"})
+OUTLOOK_SCOPE = ["https://outlook.office.com/IMAP.AccessAsUser.All"]
+OUTLOOK_AUTHORITY = "https://login.microsoftonline.com/consumers"
+_OUTLOOK_TOKEN = Path(__file__).resolve().parent.parent / ".outlook-token.json"
+_outlook_lock = threading.Lock()
+
+
+def uses_xoauth2(host: str, user: str) -> bool:
+    domain = user.lower().rsplit("@", 1)[-1] if "@" in user else ""
+    return domain in MICROSOFT_DOMAINS or host.lower() in MICROSOFT_HOSTS
+
+
+def xoauth2_string(user: str, token: str) -> bytes:
+    return f"user={user}\x01auth=Bearer {token}\x01\x01".encode("utf-8")
+
+
+def _outlook_authority(user: str) -> str:
+    domain = user.lower().rsplit("@", 1)[-1] if "@" in user else ""
+    if domain in MICROSOFT_DOMAINS:
+        return OUTLOOK_AUTHORITY
+    return "https://login.microsoftonline.com/common"
+
+
+def outlook_access_token(user: str, *, interactive: bool) -> str:
+    """Jeton IMAP Outlook. Le premier appel affiche un code à saisir sur microsoft.com/devicelogin."""
+    client_id = os.getenv("OUTLOOK_CLIENT_ID", "").strip()
+    if not client_id:
+        raise RuntimeError(
+            "Outlook exige OAuth. Ajoute OUTLOOK_CLIENT_ID dans .env "
+            "(application Entra, comptes personnels, flux public autorisé)."
+        )
+    try:
+        import msal
+    except ImportError as exc:
+        raise RuntimeError("module msal manquant — pip install -r requirements.txt") from exc
+
+    with _outlook_lock:
+        cache = msal.SerializableTokenCache()
+        if _OUTLOOK_TOKEN.exists():
+            cache.deserialize(_OUTLOOK_TOKEN.read_text(encoding="utf-8"))
+        authority = os.getenv("OUTLOOK_AUTHORITY", "").strip() or _outlook_authority(user)
+        app = msal.PublicClientApplication(client_id, authority=authority, token_cache=cache)
+        accounts = app.get_accounts()
+        wanted = user.lower()
+        match = [a for a in accounts if str(a.get("username") or "").lower() == wanted]
+        account = match[0] if match else (accounts[0] if len(accounts) == 1 else None)
+        result = app.acquire_token_silent(OUTLOOK_SCOPE, account=account) if account else None
+        if not result or "access_token" not in result:
+            if not interactive:
+                raise RuntimeError("session Outlook expirée — relance le script pour reconnecter la boîte")
+            flow = app.initiate_device_flow(scopes=OUTLOOK_SCOPE)
+            if "user_code" not in flow:
+                raise RuntimeError(flow.get("error_description") or "flux Outlook impossible")
+            print(flow["message"], flush=True)
+            result = app.acquire_token_by_device_flow(flow)
+        if cache.has_state_changed:
+            _OUTLOOK_TOKEN.write_text(cache.serialize(), encoding="utf-8")
+        if not result or "access_token" not in result:
+            detail = (result or {}).get("error_description") or "OAuth Outlook échoué"
+            raise RuntimeError(detail)
+        return result["access_token"]
+
+
+def prepare_imap(host: str, user: str) -> None:
+    """Connexion Outlook sur le fil principal, avant les workers."""
+    if uses_xoauth2(host, user):
+        outlook_access_token(user, interactive=True)
+
+
 def _login_imap(host: str, user: str, password: str) -> imaplib.IMAP4_SSL:
-    mail = imaplib.IMAP4_SSL(host)
-    mail.login(user, password)
+    mail = imaplib.IMAP4_SSL(host, timeout=60)
+    if uses_xoauth2(host, user):
+        token = outlook_access_token(user, interactive=True)
+        mail.authenticate("XOAUTH2", lambda _challenge: xoauth2_string(user, token))
+    else:
+        mail.login(user, password)
     return mail
 
 
 def _login_pop(host: str, user: str, password: str) -> poplib.POP3_SSL:
+    if uses_xoauth2(host, user):
+        raise RuntimeError("Outlook n'accepte plus POP3 par mot de passe. Utilise IMAP.")
     mail = poplib.POP3_SSL(host, timeout=30)
     mail.user(user)
     mail.pass_(password)
@@ -426,6 +615,7 @@ class SharedMailbox:
         self.ok_polls = 0
         self._auth_fails = 0
         self._imap = None
+        self._uid_cursor: dict[str, int] = {}
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -534,44 +724,59 @@ class SharedMailbox:
         return self._fetch_imap(seen)
 
     def _fetch_imap(self, seen: set[str]) -> list[tuple[str, Message]]:
-        out: list[tuple[str, Message]] = []
+        """Lit seulement les UID apparus depuis le dernier passage.
+
+        Une recherche SUBJECT sur Gmail parcourt toute la boîte et dépasse
+        souvent le délai, alors que le mail est déjà visible. Le numéro UID
+        du dernier message, lui, répond tout de suite.
+        """
         if self._imap is None:
             self._imap = _login_imap(self.host, self.user, self.password)
-            self._imap.select("INBOX", readonly=True)
         mail = self._imap
         try:
-            since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
-            typ, data = mail.uid("SEARCH", f"(SINCE {since})")
-            if typ != "OK" or not data or not data[0]:
-                return out
-            pending: list[str] = []
-            for uid in data[0].split():
-                key = uid.decode() if isinstance(uid, bytes) else str(uid)
-                if key not in seen:
-                    pending.append(key)
-            for key in pending[-200:]:
-                typ, fetched = mail.uid(
-                    "FETCH", key, "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DELIVERED-TO X-ORIGINAL-TO CC)])"
-                )
-                header = email_lib.message_from_bytes(_imap_literal(fetched))
-                subj = str(header.get("Subject") or "").lower()
+            folders = ("INBOX", "Junk") if uses_xoauth2(self.host, self.user) else ("INBOX", "[Gmail]/Spam")
+            for folder in folders:
                 with self._lock:
-                    listeners = list(self._listeners.keys())
-                addr = _address_headers(header)
-                worth = (
-                    "ugc" in subj
-                    or "inscription" in subj
-                    or "confirmez" in subj
-                    or any(_same_box(l, addr) for l in listeners)
-                )
-                if not worth:
-                    seen.add(key)
+                    waiting = [k for k in self._listeners if k not in self._links]
+                if self._listeners and not waiting:
+                    break
+                try:
+                    typ, _ = mail.select(folder, readonly=True)
+                except imaplib.IMAP4.error:
                     continue
-                typ, fetched = mail.uid("FETCH", key, "(BODY.PEEK[])")
-                raw = _imap_literal(fetched)
-                if raw:
-                    out.append((key, email_lib.message_from_bytes(raw)))
-            return out
+                if typ != "OK":
+                    continue
+                if folder not in self._uid_cursor:
+                    typ, latest = mail.uid("FETCH", "*", "(UID)")
+                    highest = _highest_uid(latest) if typ == "OK" else 0
+                    if highest <= 0:
+                        continue
+                    self._uid_cursor[folder] = max(0, highest - 100)
+                start = self._uid_cursor[folder] + 1
+                typ, fetched = mail.uid(
+                    "FETCH", f"{start}:*", "(UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])"
+                )
+                if typ != "OK":
+                    continue
+                fresh: list[str] = []
+                top = self._uid_cursor[folder]
+                for uid, raw in _uid_bodies(fetched):
+                    number = int(uid)
+                    if number <= self._uid_cursor[folder]:
+                        continue
+                    top = max(top, number)
+                    if _is_ugc_header(email_lib.message_from_bytes(raw)):
+                        fresh.append(uid)
+                for i in range(0, len(fresh), 15):
+                    chunk = ",".join(fresh[i : i + 15])
+                    typ, bodies = mail.uid("FETCH", chunk, "(UID BODY.PEEK[])")
+                    if typ != "OK":
+                        continue
+                    for uid, raw in _uid_bodies(bodies):
+                        seen.add(uid)
+                        self._process_message(email_lib.message_from_bytes(raw))
+                self._uid_cursor[folder] = top
+            return []
         except Exception:
             self._close_imap()
             raise

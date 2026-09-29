@@ -9,5 +9,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 accounts.csv
+.outlook-token.json
 
 chrome-network-logger/

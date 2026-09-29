@@ -13,6 +13,26 @@ class CaptchaError(RuntimeError):
     pass
 
 
+# Un seul client pour tous les threads : pas de nouvelle poignée TLS à chaque interrogation.
+_http = httpx.Client(
+    timeout=30.0,
+    limits=httpx.Limits(max_connections=400, max_keepalive_connections=100),
+)
+# Erreurs de charge côté fournisseur : on attend et on renvoie la tâche.
+_BUSY = ("ERROR_NO_SLOT_AVAILABLE", "ERROR_TOO_MUCH_REQUESTS", "ERROR_MAXIMUM_TIME_EXCEED")
+
+
+def _call(url: str, payload: dict) -> dict:
+    for attempt in range(5):
+        try:
+            return _http.post(url, json=payload).json()
+        except (httpx.TransportError, ValueError):
+            if attempt == 4:
+                raise
+            time.sleep(1 + attempt)
+    raise CaptchaError("fournisseur captcha injoignable")
+
+
 def solve_friendly_captcha(
     provider: str,
     api_key: str,
@@ -38,7 +58,7 @@ def get_balance(provider: str, api_key: str) -> float:
     }.get(provider)
     if not url:
         raise CaptchaError(f"CAPTCHA_PROVIDER inconnu: {provider}")
-    body = httpx.post(url, json={"clientKey": api_key}, timeout=20.0).json()
+    body = _call(url, {"clientKey": api_key})
     if body.get("errorId"):
         raise CaptchaError(f"{body.get('errorCode')}: {body.get('errorDescription')}")
     return float(body.get("balance") or 0)
@@ -99,24 +119,30 @@ def _capsolver(api_key: str, website_url: str, sitekey: str) -> str:
 
 
 def _create(url: str, api_key: str, task: dict) -> str:
-    r = httpx.post(url, json={"clientKey": api_key, "task": task}, timeout=30.0)
-    body = r.json()
-    if body.get("errorId"):
-        raise CaptchaError(f"{body.get('errorCode')}: {body.get('errorDescription')}")
-    task_id = body.get("taskId")
-    if not task_id:
-        raise CaptchaError(f"pas de taskId: {body}")
-    return str(task_id)
+    for attempt in range(8):
+        body = _call(url, {"clientKey": api_key, "task": task})
+        code = str(body.get("errorCode") or "")
+        if body.get("errorId") and code in _BUSY and attempt < 7:
+            time.sleep(2 + attempt)
+            continue
+        if body.get("errorId"):
+            raise CaptchaError(f"{code}: {body.get('errorDescription')}")
+        task_id = body.get("taskId")
+        if not task_id:
+            raise CaptchaError(f"pas de taskId: {body}")
+        return str(task_id)
+    raise CaptchaError("fournisseur captcha saturé")
 
 
 def _poll(url: str, api_key: str, task_id: str) -> dict:
     tid: int | str = int(task_id) if task_id.isdigit() else task_id
-    for _ in range(60):
-        time.sleep(3)
-        r = httpx.post(url, json={"clientKey": api_key, "taskId": tid}, timeout=30.0)
-        body = r.json()
-        if body.get("errorId"):
-            raise CaptchaError(f"{body.get('errorCode')}: {body.get('errorDescription')}")
+    time.sleep(4)
+    for _ in range(90):
+        body = _call(url, {"clientKey": api_key, "taskId": tid})
+        code = str(body.get("errorCode") or "")
+        if body.get("errorId") and code != "CAPTCHA_NOT_READY":
+            raise CaptchaError(f"{code}: {body.get('errorDescription')}")
         if body.get("status") == "ready":
             return body.get("solution") or {}
+        time.sleep(2)
     raise CaptchaError("timeout résolution Friendly Captcha")
