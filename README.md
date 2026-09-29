@@ -14,7 +14,20 @@ Chaque compte prend environ une minute. L’opération est réussie lorsque `fid
 
 Python 3.11 ou plus.
 
-```bash
+> **Important :** les commandes ci-dessous doivent être tapées dans un **terminal** (PowerShell, Invite de commandes / CMD ou Terminal Windows), **pas** dans l’interpréteur Python affichant `>>>`.
+>
+> Si tu vois `>>>`, tape `exit()` puis appuie sur Entrée pour revenir au terminal.
+
+Sous Windows :
+
+```powershell
+py -m pip install -r requirements.txt
+copy .env.example .env
+```
+
+Si la commande `py` n’est pas disponible, utilise :
+
+```powershell
 python -m pip install -r requirements.txt
 copy .env.example .env
 ```
